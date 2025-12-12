@@ -339,6 +339,37 @@
 </header>
 
 <main>
+<!-- ✅ 分享連結 + 最後更新時間（新增） -->
+<section id="share">
+  <h2>分享這個網站</h2>
+
+  <div class="card">
+    <h4>分享連結</h4>
+    <p>把下面這個網址貼給別人就能直接打開（不需要你的電腦開著）。</p>
+
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+      <input
+        id="share-url"
+        type="text"
+        readonly
+        style="flex:1; min-width:260px; padding:10px 12px; border-radius:12px; border:1px solid rgba(244,188,212,.8);"
+      />
+      <button
+        id="copy-url"
+        type="button"
+        style="padding:10px 14px; border-radius:12px; border:1px solid rgba(244,188,212,.8); background: var(--cream); cursor:pointer;"
+      >
+        複製網址
+      </button>
+      <span id="copy-status" style="color: var(--muted);"></span>
+    </div>
+
+    <p style="margin-top:12px; color: var(--muted);">
+      最後更新時間：<strong id="last-updated">讀取中…</strong>
+    </p>
+  </div>
+</section>
+
   <section class="hero" id="hero">
     <div>
       <div class="tag">Pink Chihuahua Mood</div>
@@ -515,6 +546,53 @@
       if (list) list.innerHTML = `<li>（發生錯誤：${err.message}）</li>`;
     }
   });
+  
+  // ✅ 1) 顯示分享網址 + 複製按鈕
+  (function setupShareLink() {
+    const url = window.location.href;
+    const input = document.getElementById("share-url");
+    const btn = document.getElementById("copy-url");
+    const status = document.getElementById("copy-status");
+
+    if (input) input.value = url;
+
+    if (btn) {
+      btn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(url);
+          if (status) status.textContent = "已複製";
+          setTimeout(() => { if (status) status.textContent = ""; }, 1500);
+        } catch (e) {
+          // fallback（某些瀏覽器權限會擋剪貼簿）
+          window.prompt("複製這個網址：", url);
+        }
+      });
+    }
+  })();
+
+  // ✅ 2) 顯示「最後更新時間」：抓 data/youtube.json 的 Last-Modified
+  (async function setupLastUpdated() {
+    const el = document.getElementById("last-updated");
+    if (!el) return;
+
+    try {
+      // 用 HEAD 取回 header（不下載整個 JSON）
+      const res = await fetch("data/youtube.json", { method: "HEAD", cache: "no-store" });
+      const lm = res.headers.get("last-modified");
+
+      if (lm) {
+        const d = new Date(lm);
+        el.textContent = isNaN(d.getTime())
+          ? lm
+          : d.toLocaleString("zh-TW", { hour12: false });
+      } else {
+        // 如果拿不到 header，就退而求其次顯示「目前時間」
+        el.textContent = new Date().toLocaleString("zh-TW", { hour12: false });
+      }
+    } catch (e) {
+      el.textContent = "讀取失敗（稍後再試）";
+    }
+  })();
 </script>
 </body>
 </html>
