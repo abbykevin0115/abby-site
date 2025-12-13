@@ -1,0 +1,31 @@
+name: Daily Data Update
+
+on:
+  schedule:
+    # 台灣時間 01:00 = UTC 17:00（前一天）
+    - cron: "0 17 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Update data
+        run: |
+          mkdir -p data
+          date +"%Y-%m-%d %H:%M:%S" > data/last_run_taipei_local.txt
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "chore(data): daily update"
+          git push
