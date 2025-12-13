@@ -594,5 +594,19 @@
     }
   })();
 </script>
+  <div id="last-updated" style="font-size:14px; opacity:0.75; margin-top:16px;">
+  最後更新時間：讀取中…
+</div>
+
+<script>
+  fetch('./data/last_run_taipei_local.txt', { cache: 'no-store' })
+    .then(r => r.text())
+    .then(t => {
+      document.getElementById('last-updated').textContent = '最後更新時間：' + t.trim();
+    })
+    .catch(() => {
+      document.getElementById('last-updated').textContent = '最後更新時間：讀取失敗';
+    });
+</script>
 </body>
 </html>
