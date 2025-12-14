@@ -1,11 +1,14 @@
 from __future__ import annotations
+
 import argparse
 import datetime as dt
-import yaml
 import re
 from collections import Counter
 from pathlib import Path
+
+import yaml
 from docx import Document
+
 
 # -----------------------
 # 讀取模板（任務規格）
@@ -14,109 +17,210 @@ def load_template(template_path: Path) -> dict:
     with template_path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-# -----------------------
-# 讀取來源文字（30 天文章）
-# -----------------------
-def read_source_text(source_path: Path) -> str:
-    if source_path.suffix.lower() == ".txt":
-        return source_path.read_text(encoding="utf-8")
-    elif source_path.suffix.lower() == ".docx":
-        doc = Document(str(source_path))
-        return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-    else:
-        raise ValueError(f"不支援的來源格式：{source_path.suffix}")
 
 # -----------------------
-# 通用版：從來源文抽出「技術名詞候選」
+# 讀取來源文字（30 天文章 / 全系列 Word）
 # -----------------------
-def extract_internal_notes(text: str) -> dict:
-    """
-    通用抽取規則（不靠 LLM）：
-    - 抓看起來像技術名詞的字串（英文、含數字或符號）
-    - 用頻率排序，取得本書可能的重要技術詞
-    """
+def read_docx_paragraphs(source_path: Path) -> list[str]:
+    if source_path.suffix.lower() != ".docx":
+        raise ValueError(f"目前只支援 docx，收到：{source_path.suffix}")
+    doc = Document(str(source_path))
+    return [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
 
-    # 1) 粗抓候選
-    raw_candidates = re.findall(r"[A-Za-z][A-Za-z0-9_\-\.]{1,}", text)
 
-    # 2) 移除常見停用字
-    stop = {
-        "the","and","with","from","into","that","this","your","you","are","for","to","in","of","on","as",
-        "is","be","by","an","or","at","it","we","our","can","will","not","use","using"
-    }
+# -----------------------
+# 判斷某段落是否「像程式碼」
+# 目的：把 code-heavy 段落先排除，避免抽到 const/if/for 這種 token
+# -----------------------
+_CODE_SYMBOLS = set("{}[]();=<>/*\\|`~$#@")
+_CODE_KEYWORDS = {
+    "const", "let", "var", "function", "return", "if", "else", "for", "while",
+    "class", "import", "export", "from", "try", "catch", "async", "await",
+    "def", "print", "None", "True", "False"
+}
 
-    candidates = []
-    for w in raw_candidates:
+
+def looks_like_code(paragraph: str) -> bool:
+    s = paragraph.strip()
+    if not s:
+        return False
+
+    # 1) 太短且只有符號/代碼
+    if len(s) <= 25 and any(ch in _CODE_SYMBOLS for ch in s):
+        return True
+
+    # 2) 符號比例高（常見於 code）
+    symbol_count = sum(1 for ch in s if ch in _CODE_SYMBOLS)
+    if symbol_count / max(len(s), 1) >= 0.08:
+        return True
+
+    # 3) 出現多個 code keywords
+    tokens = re.findall(r"[A-Za-z_]\w*", s)
+    hit = sum(1 for t in tokens if t in _CODE_KEYWORDS)
+    if hit >= 2:
+        return True
+
+    # 4) 像 JSON / dict / code block
+    if s.startswith("{") and s.endswith("}"):
+        return True
+    if "```" in s:
+        return True
+
+    return False
+
+
+# -----------------------
+# 抽取「技術名詞候選」（通用版，偏出版可用）
+# 策略：
+# - 只從「非程式碼段落」抽（先過濾）
+# - 優先抓：縮寫（LLM/RAG/API）、TitleCase（LangGraph/NotebookLM）、含連字號/點的框架名
+# - 排除：過短/常見字/程式語法字
+# -----------------------
+_STOP_WORDS = {
+    "the","and","with","from","into","that","this","your","you","are","for","to","in","of","on","as",
+    "is","be","by","an","or","at","it","we","our","can","will","not","use","using",
+    "a","i","ok","app"  # 你剛剛踩雷的也直接放進來
+}
+_BLACKLIST = {
+    # 常見程式 token 或太泛用，不該進故事當「技術名詞」
+    "const", "let", "var", "if", "else", "for", "while", "return",
+    "true", "false", "none", "null",
+    "amount", "category", "title", "data", "test", "example"
+}
+
+
+def extract_terms_from_text(text: str, top_k: int = 12) -> list[str]:
+    # 1) 先抓英文字串候選（含 - _ .）
+    raw = re.findall(r"[A-Za-z][A-Za-z0-9_\-\.]{1,}", text)
+
+    candidates: list[str] = []
+    for w in raw:
         lw = w.lower()
-        if lw in stop:
-            continue
-        if len(w) < 2:
-            continue
-        candidates.append(w)
 
-    # 3) 計算出現頻率
+        if lw in _STOP_WORDS or lw in _BLACKLIST:
+            continue
+        if len(w) < 3:
+            continue
+
+        # 優先保留：縮寫（全大寫）或 TitleCase 或 含點/連字號（框架/版本）
+        is_acronym = w.isupper() and 2 <= len(w) <= 8
+        is_titlecase = w[0].isupper() and any(ch.islower() for ch in w[1:])
+        has_sep = ("-" in w) or ("." in w) or ("_" in w)
+
+        if is_acronym or is_titlecase or has_sep:
+            candidates.append(w)
+
     freq = Counter(candidates)
+    terms = [t for t, _ in freq.most_common(top_k)]
 
-    # 4) 取前 12 個作為候選池
-    top_terms = [t for t, _ in freq.most_common(12)]
+    # 去重但保序
+    seen = set()
+    uniq = []
+    for t in terms:
+        if t not in seen:
+            uniq.append(t)
+            seen.add(t)
+    return uniq
 
-    # 5) 預覽用（未來可擴充）
-    preview = "\n".join([line.strip() for line in text.splitlines() if line.strip()][:8])
+
+def extract_internal_notes(paragraphs: list[str]) -> dict:
+    prose_paras = [p for p in paragraphs if not looks_like_code(p)]
+    prose_text = "\n".join(prose_paras)
+
+    terms = extract_terms_from_text(prose_text, top_k=12)
+
+    # 取一小段當 preview（純敘述段落）
+    preview_lines = prose_paras[:8]
 
     return {
-        "observed_terms": top_terms,
-        "preview": preview,
-        "core_theme_hint": "把書的核心技術與流程，用白話故事說清楚"
+        "observed_terms": terms,
+        "preview": "\n".join(preview_lines),
+        "prose_count": len(prose_paras),
+        "all_count": len(paragraphs)
     }
 
+
 # -----------------------
-# 生成任務一故事（依輸入而變）
+# 故事生成（重點）
+# - 禁止 keyword dump（不列清單）
+# - 技術名詞以「角色」分散嵌入
+# - 四段敘事：情境 → 角色與主線 → 協作流程 → 快照收斂
 # -----------------------
-def generate_task01_story(template: dict, notes: dict) -> list[str]:
-    rule = template["structure"].get("required_terms_rule", {})
+def pick_terms_for_story(template: dict, notes: dict) -> list[str]:
+    rule = template["structure"].get("required_terms_rule", {"min_terms": 3, "max_terms": 8})
     min_terms = int(rule.get("min_terms", 3))
     max_terms = int(rule.get("max_terms", 8))
 
-    terms = notes.get("observed_terms", [])
-    picked = terms[:max_terms]
+    observed = notes.get("observed_terms", [])
+    picked = observed[:max_terms]
 
+    # fallback：抽不到就給占位，但不要影響敘事太多
     if len(picked) < min_terms:
-        picked = picked + ["（核心技術）"] * (min_terms - len(picked))
+        fallback = ["核心技術", "主要工具", "產出方式"]
+        picked = (picked + fallback)[:max_terms]
+        while len(picked) < min_terms:
+            picked.append("關鍵概念")
 
-    pocket = "、".join(picked)
+    return picked
 
+
+def generate_task01_story(template: dict, notes: dict) -> list[str]:
+    picked = pick_terms_for_story(template, notes)
+
+    # 用 3~5 個詞做「角色嵌入」，但不列成清單
+    t1 = picked[0]
+    t2 = picked[1] if len(picked) > 1 else "主要工具"
+    t3 = picked[2] if len(picked) > 2 else "產出方式"
+    t4 = picked[3] if len(picked) > 3 else None
+
+    # 段 1：情境（你要的「先讓我懂在幹嘛」）
     p1 = (
-        "拿到一本完全陌生的技術書時，第一件事不是理解所有細節，"
-        "而是先搞清楚：這本書到底要帶你完成什麼。"
-        "任務一的目的，就是先用白話把整個主題翻譯給你聽。"
+        "你拿到這本書時，可以先不要急著鑽進細節。"
+        "任務一要做的，是把它的『核心主題』翻譯成你一眼就懂的故事："
+        "這本書不是在堆術語，而是在教你怎麼把一件事做成、做穩。"
     )
 
+    # 段 2：角色與主線（技術名詞自然出現）
     p2 = (
-        f"從這本書的內容中，可以先抓出一些反覆出現的技術關鍵詞：{pocket}。"
-        "你現在不需要精通它們，只要把它們當成故事裡的重要角色，"
-        "等一下就會看到它們是怎麼一起把事情推進的。"
+        f"你可以把 {t1} 想成故事的主角，它決定了整本書的主線在走哪條路；"
+        f"{t2} 像是主角手上的工具箱，負責把抽象想法變成可操作的步驟；"
+        f"而 {t3} 則像是最後會留下的『成果形狀』，讓你能看見、能檢查、能拿去用。"
     )
 
-    p3 = (
-        "接下來的故事，會描述一條把想法變成可驗證成果的路線："
-        "先有目標與方法，再透過某些工具或框架把事情拆解，"
-        "最後產出一個你能實際檢查的結果。"
-        "這條路線會成為後續所有任務的共同基礎。"
-    )
+    # 段 3：協作流程（你要求的「角色怎麼接力」）
+    if t4:
+        p3 = (
+            "接下來的流程像接力：你先用主線概念把方向定住，"
+            f"再用 {t2} 這類方法把事情拆成可以逐步完成的小任務；"
+            f"中途會透過 {t4} 這類輔助角色處理『串接/整合/自動化』的細節，"
+            f"最後把成果落在 {t3} 上，讓你可以反覆驗證、再調整、直到穩定。"
+        )
+    else:
+        p3 = (
+            "接下來的流程像接力：你先把方向定住，"
+            f"再用 {t2} 這類方法把事情拆成可以逐步完成的小任務；"
+            f"最後把成果落在 {t3} 上，讓你可以反覆驗證、再調整、直到穩定。"
+        )
 
+    # 段 4：快照收斂（你最重視的那句）
     snapshot_starter = template["structure"]["required_section_starter"]["snapshot"]
     p4 = (
         f"{snapshot_starter}：你腦中只要留下這張快照——"
-        f"這本書會以 {picked[0]} 為核心概念，搭配 {picked[1]}、{picked[2]} 等方法或工具，"
-        "一步一步把事情做出來，最後留下可以被你檢查與判斷的成果。"
+        f"『這本書會用 {t1} 把主線定清楚，用 {t2} 把路徑拆開，"
+        f"最後把成果落在 {t3} 讓你看得見、驗得到、改得動。』"
     )
 
     return [p1, p2, p3, p4]
 
+
 # -----------------------
-# 檢核是否符合任務規格
+# 檢核（硬規格）
+# - 段落數
+# - 快照句
+# - 技術名詞命中數（依規則）
+# - 禁止 keyword dump（出現「：A、B、C」這種直接判失敗）
 # -----------------------
-def validate_story(template: dict, paragraphs: list[str]) -> None:
+def validate_story(template: dict, notes: dict, paragraphs: list[str]) -> None:
     if len(paragraphs) != template["structure"]["paragraphs"]:
         raise ValueError("段落數不符合模板要求")
 
@@ -127,18 +231,20 @@ def validate_story(template: dict, paragraphs: list[str]) -> None:
     if snapshot not in joined:
         raise ValueError("缺少快照收斂段落的固定開頭")
 
+    # 禁止 keyword dump：出現「：」後面緊跟多個逗號/頓號分隔
+    if re.search(r"：[^。\n]{0,50}(、|,).+(、|,).+", joined):
+        raise ValueError("偵測到關鍵字清單式輸出（keyword dump），不符合敘事要求")
+
     # 技術名詞數量檢核（通用規則）
     rule = template["structure"].get("required_terms_rule")
     if rule:
         min_terms = int(rule.get("min_terms", 3))
         max_terms = int(rule.get("max_terms", 8))
-        observed = template.get("_runtime_observed_terms", [])
-        if observed:
-            hit = [t for t in observed[:max_terms] if t in joined]
-            if len(hit) < min_terms:
-                raise ValueError(
-                    f"技術名詞出現不足：需要至少 {min_terms} 個，實際只有 {len(hit)} 個"
-                )
+        observed = notes.get("observed_terms", [])
+        hit = [t for t in observed[:max_terms] if t in joined]
+        if len(hit) < min_terms:
+            raise ValueError(f"技術名詞出現不足：需要至少 {min_terms} 個，實際只有 {len(hit)} 個")
+
 
 # -----------------------
 # 輸出 Word
@@ -150,6 +256,7 @@ def write_docx(title: str, paragraphs: list[str], output_path: Path) -> None:
         doc.add_paragraph(p)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
+
 
 # -----------------------
 # 主程式
@@ -164,14 +271,11 @@ def main():
     args = ap.parse_args()
 
     template = load_template(Path(args.template))
-    text = read_source_text(Path(args.source))
-    notes = extract_internal_notes(text)
+    paras = read_docx_paragraphs(Path(args.source))
+    notes = extract_internal_notes(paras)
 
-    # runtime only：讓 validate_story 用
-    template["_runtime_observed_terms"] = notes.get("observed_terms", [])
-
-    paragraphs = generate_task01_story(template, notes)
-    validate_story(template, paragraphs)
+    story = generate_task01_story(template, notes)
+    validate_story(template, notes, story)
 
     today = dt.datetime.now().strftime("%Y%m%d")
     filename = template["output"]["filename_pattern"].format(
@@ -180,9 +284,13 @@ def main():
     out_path = Path(args.outdir) / filename
 
     title = template.get("name", "任務一｜主題白話理解")
-    write_docx(title, paragraphs, out_path)
+    write_docx(title, story, out_path)
 
+    print("Source paragraphs:", notes.get("all_count"))
+    print("Prose paragraphs:", notes.get("prose_count"))
+    print("Observed terms:", notes.get("observed_terms"))
     print(f"OK: {out_path}")
+
 
 if __name__ == "__main__":
     main()
