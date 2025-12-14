@@ -1,0 +1,24 @@
+id: task01
+version: "1.0"
+name: "任務一｜主題白話理解（主題 × 技術角色故事版）"
+
+structure:
+  paragraphs: 4
+  required_terms:
+    - "Cursor"
+    - "GitHub"
+    - "網頁"
+  required_section_starter:
+    snapshot: "如果只留下一個畫面給 Abby"
+
+tone:
+  audience: "完全外行但邏輯正常"
+  style: ["白話", "生活化", "故事/對話/實驗比喻"]
+  forbidden: ["教科書定義", "術語堆疊", "行銷文案"]
+
+output:
+  format: "docx"
+  target_length:
+    approx_pages: 1
+    paragraph_count: [3, 4]
+  filename_pattern: "任務01_主題白話理解_{book}_{author}_{date}.docx"
