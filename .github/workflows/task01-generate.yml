@@ -1,0 +1,37 @@
+name: Generate Task01 Docx
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 17 * * *"  # UTC 17:00 = 台灣 01:00
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install python-docx pyyaml
+
+      - name: Generate Task01
+        run: |
+          python scripts/generate_task01.py \
+            --template templates/task01_v1_0.yml \
+            --source sources/author_30days.docx \
+            --author "測試作者" \
+            --book "測試書名" \
+            --outdir outputs
+
+      - name: Upload outputs as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: task01-outputs
+          path: outputs/**
