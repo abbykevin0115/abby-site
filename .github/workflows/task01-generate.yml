@@ -24,7 +24,7 @@ jobs:
       - name: Generate Task01
         run: |
           python scripts/generate_task01.py \
-            --template templates/task01_v1_0.yml \
+            --template templates/task01_v1_1.yml \
             --source sources/author_30days.docx \
             --author "測試作者" \
             --book "測試書名" \
